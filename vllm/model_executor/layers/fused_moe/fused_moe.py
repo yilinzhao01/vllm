@@ -1327,6 +1327,7 @@ def inplace_fused_experts(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
@@ -1354,6 +1355,7 @@ def inplace_fused_experts(
         use_int8_w8a8,
         use_int8_w8a16,
         use_int4_w4a16,
+        use_rocfp4,
         ocp_mx_scheme,
         per_channel_quant,
         global_num_experts,
@@ -1382,6 +1384,7 @@ def inplace_fused_experts_fake(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
@@ -1419,6 +1422,7 @@ def outplace_fused_experts(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
@@ -1446,6 +1450,7 @@ def outplace_fused_experts(
         use_int8_w8a8,
         use_int8_w8a16,
         use_int4_w4a16,
+        use_rocfp4,
         ocp_mx_scheme,
         per_channel_quant,
         global_num_experts,
@@ -1473,6 +1478,7 @@ def outplace_fused_experts_fake(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
@@ -1545,6 +1551,7 @@ def fused_experts(
         use_int8_w8a8=quant_config.use_int8_w8a8,
         use_int8_w8a16=quant_config.use_int8_w8a16,
         use_int4_w4a16=quant_config.use_int4_w4a16,
+        use_rocfp4=quant_config.use_rocfp4,
         ocp_mx_scheme=quant_config.ocp_mx_scheme,
         per_channel_quant=quant_config.per_act_token_quant,
         global_num_experts=global_num_experts,
@@ -1565,6 +1572,7 @@ def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     ocp_mx_scheme: str | None,
+    use_rocfp4: bool,
 ) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1577,6 +1585,8 @@ def _get_config_quant_dtype(
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
+    elif use_rocfp4:
+        return "rocfp4"
     elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":
         return "mxfp4"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e3m2", "w_mxfp6_e3m2_a_mxfp6_e3m2"}:
@@ -1599,6 +1609,7 @@ def fused_experts_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
+    use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
@@ -1669,6 +1680,7 @@ def fused_experts_impl(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         ocp_mx_scheme=ocp_mx_scheme,
+        use_rocfp4=use_rocfp4,
     )
 
     get_config_func = functools.partial(

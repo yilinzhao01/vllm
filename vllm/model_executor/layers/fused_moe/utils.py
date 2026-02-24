@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.rocfp4_utils import (
+    quant_dequant_rocfp4,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -234,6 +237,18 @@ def _mxfp6_e2m3_quantize(
     return A, None
 
 
+def _rocfp4_quantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    per_act_token_quant: bool,
+    block_shape: list[int] | None = None,
+) -> tuple[torch.Tensor, None]:
+    # RocFP4 uses per-group quantization with group_size=16
+    # Simulated quantize-dequantize for emulated execution
+    A = quant_dequant_rocfp4(A)
+    return A, None
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -258,6 +273,8 @@ def moe_kernel_quantize_input(
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "rocfp4":
+        return _rocfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 

@@ -386,6 +386,10 @@ class FusedMoEQuantConfig:
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
+    @property
+    def use_rocfp4(self) -> bool:
+        return self.quant_dtype == "rocfp4"
+
     def config_name(self, dtype: torch.dtype) -> str | None:
         """
         Return a string used to construct the filename that contains the
@@ -495,6 +499,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e3m2",
             "mxfp6_e2m3",
             "mxfp8",
+            "rocfp4",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -503,6 +508,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e2m3",
             "int4",
             "mxfp8",
+            "rocfp4",
         }
 
         if weight_dtype is None:
@@ -725,6 +731,36 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+    )
+
+
+def rocfp4_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for rocfp4 activations and rocfp4 weights.
+
+    RocFP4 uses:
+    - FP4 weights with FP8 E5M3 scales, per-group (group_size=16)
+    - FP4 activations with FP8 E5M3 scales, per-group (group_size=16)
+    """
+    # RocFP4 uses per-group quantization with group_size=16
+    # Represent as block_shape [1, 16] for row-wise groups
+    block_shape = [1, 16]
+
+    return FusedMoEQuantConfig.make(
+        quant_dtype="rocfp4",
+        weight_dtype="rocfp4",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_act_token_quant=False,  # Per-group, not per-token
+        per_out_ch_quant=False,
+        block_shape=block_shape,
     )
 
 
