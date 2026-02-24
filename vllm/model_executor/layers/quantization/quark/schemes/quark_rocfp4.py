@@ -137,7 +137,6 @@ class QuarkROCFP4(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # TODO: by default, dequantize weights in the forward.
-
         x = self.rocfp4_quantizer(x)
 
         output = torch.nn.functional.linear(x, layer.weight, bias)

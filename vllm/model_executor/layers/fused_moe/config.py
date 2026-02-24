@@ -747,10 +747,6 @@ def rocfp4_moe_quant_config(
     - FP4 weights with FP8 E5M3 scales, per-group (group_size=16)
     - FP4 activations with FP8 E5M3 scales, per-group (group_size=16)
     """
-    # RocFP4 uses per-group quantization with group_size=16
-    # Represent as block_shape [1, 16] for row-wise groups
-    block_shape = [1, 16]
-
     return FusedMoEQuantConfig.make(
         quant_dtype="rocfp4",
         weight_dtype="rocfp4",
@@ -760,7 +756,7 @@ def rocfp4_moe_quant_config(
         a2_scale=a2_scale,
         per_act_token_quant=False,  # Per-group, not per-token
         per_out_ch_quant=False,
-        block_shape=block_shape,
+        block_shape=None,
     )
 
 

@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
+from vllm.model_executor.layers.fused_moe import (
+    modular_kernel as mk,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
@@ -25,6 +28,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     rocfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
@@ -953,6 +960,18 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
 
             layer.w2_weight = Parameter(w2_dq, requires_grad=False)
             layer.w2_weight_scale = None
+
+            # Setup TritonExperts kernel wrapped in modular kernel
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonExperts(
+                    moe_config=self.moe,
+                    quant_config=self.moe_quant_config,
+                ),
+                inplace=not self.moe.disable_inplace,
+            )
         else:
             raise NotImplementedError("Native RocFP4 MoE kernels not yet implemented")
 
@@ -978,22 +997,14 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.emulate:
-            # Simulation path with activation QDQ.
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            return fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=not self.moe.disable_inplace,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-            )
-        else:
-            raise NotImplementedError("Native RocFP4 MoE kernels not yet implemented")
+        return self.kernel(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+        )
