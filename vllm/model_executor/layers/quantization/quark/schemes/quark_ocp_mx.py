@@ -217,9 +217,10 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         # TODO: integrate (or test) mixed-precision kernel.
-        self.emulate = not current_platform.supports_mx() or (
-            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
-        )
+        # self.emulate = not current_platform.supports_mx() or (
+        #     self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        # )
+        self.emulate = True
         self.emulation_dequantize_weights = emulation_dequantize_weights
         if self.emulation_dequantize_weights:
             logger.info_once(
@@ -387,6 +388,7 @@ class QuarkOCP_MX(QuarkScheme):
                 dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             else:
                 dq_w = layer.weight
+            
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         else:

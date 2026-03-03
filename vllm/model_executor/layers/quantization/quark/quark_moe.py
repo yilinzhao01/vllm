@@ -767,11 +767,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        self.emulate = (
-            not current_platform.supports_mx()
-            or not self.ocp_mx_scheme.startswith("w_mxfp4")
-            or not self.ocp_mx_scheme.endswith("a_mxfp4")
-        ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
+        self.emulate = True
+        # self.emulate = (
+        #     not current_platform.supports_mx()
+        #     or not self.ocp_mx_scheme.startswith("w_mxfp4")
+        #     or not self.ocp_mx_scheme.endswith("a_mxfp4")
+        # ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
         self.emulation_dequantize_weights = emulation_dequantize_weights
         if self.emulation_dequantize_weights:
             logger.info_once(
@@ -1052,8 +1053,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             return ocp_mx_moe_quant_config(
                 quant_dtype=self.input_dtype,
                 weight_dtype=self.weight_dtype,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=layer.w13_weight_scale if not self.emulate else None,
+                w2_scale=layer.w2_weight_scale if not self.emulate else None,
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 a1_scale=None,
