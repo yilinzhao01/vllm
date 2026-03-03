@@ -33,15 +33,15 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import (
     Mxfp4Backend,
@@ -1505,7 +1505,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts_input=shared_experts_input,
         )
-
 
 
 class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
