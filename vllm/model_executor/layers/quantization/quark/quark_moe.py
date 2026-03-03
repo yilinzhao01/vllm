@@ -3,10 +3,13 @@
 
 from typing import Any
 
+import quark.torch.kernel
 import torch
+from quark.torch.utils.pack import Pack_fp4
+from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -17,14 +20,22 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     MoEActivation,
 )
+from vllm.model_executor.layers.fused_moe import (
+    modular_kernel as mk,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
+    rocfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
@@ -71,6 +82,7 @@ __all__ = [
     "QuarkOCP_MX_MoEMethod",
     "QuarkNvfp4MoEMethod",
     "QuarkOCP_MX_MoEMethod_OSS",
+    "Quark_rocFP4_MoEMethod",
 ]
 
 
@@ -123,6 +135,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                     module.moe_config,
                     emulation_dequantize_weights=quant_config.emulation_dequantize_weights,
                 )
+        elif quant_config._is_rocfp4(weight_config, input_config):
+            return Quark_rocFP4_MoEMethod(
+                weight_config, input_config, module.moe_config
+            )
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -1487,5 +1503,219 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
+        )
+
+
+
+class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
+    """
+    Quark rocFP4 MoE quantization method.
+
+    Supports loading RocFP4 checkpoints with the following structure:
+    - Weights: FP4 packed in uint8 (2 values per byte)
+    - Scales: FP8 E5M3 in uint8, per-group (group_size=16)
+    - Dynamic rocFP4 activation quantization.
+    """
+
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
+        self.weight_quant = weight_config
+        self.input_quant = input_config
+
+        self.group_size = 16
+
+        # TODO: implement non-emulation code path.
+        self.emulate = True
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.group_size = self.group_size
+
+        # Set weight block size for FusedMoE weight loader
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
+        )
+
+        params_dtype = torch.uint8  # Packed FP4 and FP8 scales stored as uint8
+
+        # W13 WEIGHT: FP4 packed as uint8 (2 FP4 values per byte)
+        # Shape: [num_experts, 2*intermediate_size, hidden_size // 2]
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,  # Packed dimension
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # W2 WEIGHT: FP4 packed as uint8
+        # Shape: [num_experts, hidden_size, intermediate_size // 2]
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,  # Packed dimension
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # W13 WEIGHT SCALES: FP8 E5M3 per-group scales
+        # Shape: [num_experts, 2*intermediate_size, hidden_size // 16]
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.group_size,
+                dtype=params_dtype,  # FP8 E5M3 stored as uint8
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        # W2 WEIGHT SCALES: FP8 E5M3 per-group scales
+        # Shape: [num_experts, hidden_size, intermediate_size // 16]
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.group_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.emulate:
+            packing_instance = Pack_fp4(None, "fp4")
+
+            # Process w13_weight
+            # 1. Dequantize scales (FP8 E5M3 → FP32)
+            w13_scale_dq = quark.torch.kernel.dequantize(  # type: ignore[attr-defined]
+                "fp8_e5m3",
+                layer.w13_weight_scale.data,
+                None,  # scale
+                None,  # zero_point
+                -1,  # ch_axis
+                1,  # group_size
+                "per_group",  # qscheme
+            )
+
+            # 2. Unpack FP4 weights
+            w13_unpacked = packing_instance.unpack(
+                layer.w13_weight.data,
+                reorder=None,
+            )
+
+            # 3. Dequantize FP4 weights using FP32 scales
+            w13_dq = quark.torch.kernel.dequantize(
+                "fp4",
+                w13_unpacked,
+                w13_scale_dq,
+                None,
+                -1,
+                self.group_size,
+                "per_group",
+            )
+            w13_dq = w13_dq.to(layer.orig_dtype)
+
+            layer.w13_weight = Parameter(w13_dq, requires_grad=False)
+            layer.w13_weight_scale = None
+
+            # Process w2_weight (same process)
+            w2_scale_dq = quark.torch.kernel.dequantize(  # type: ignore[attr-defined]
+                "fp8_e5m3",
+                layer.w2_weight_scale.data,
+                None,  # scale
+                None,  # zero_point
+                -1,  # ch_axis
+                1,  # group_size
+                "per_group",  # qscheme
+            )
+
+            w2_unpacked = packing_instance.unpack(
+                layer.w2_weight.data,
+                reorder=None,
+            )
+
+            w2_dq = quark.torch.kernel.dequantize(
+                "fp4", w2_unpacked, w2_scale_dq, None, -1, self.group_size, "per_group"
+            )
+            w2_dq = w2_dq.to(layer.orig_dtype)
+
+            layer.w2_weight = Parameter(w2_dq, requires_grad=False)
+            layer.w2_weight_scale = None
+
+            # Setup TritonExperts kernel wrapped in modular kernel
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                TritonExperts(
+                    moe_config=self.moe,
+                    quant_config=self.moe_quant_config,
+                ),
+                inplace=not self.moe.disable_inplace,
+            )
+        else:
+            raise NotImplementedError("Native RocFP4 MoE kernels not yet implemented")
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        if self.emulate:
+            # For simulated path with dequantized weights
+            # Still return config to enable dynamic activation quantization
+            return rocfp4_moe_quant_config(
+                w1_scale=None,  # Weights already dequantized
+                w2_scale=None,
+                a1_scale=None,  # Dynamic quantization
+                a2_scale=None,
+            )
+        else:
+            raise NotImplementedError("Native RocFP4 MoE kernels not yet implemented")
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: Any | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.kernel(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
         )

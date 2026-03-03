@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
 from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkNVFP4,
     QuarkOCP_MX,
+    QuarkROCFP4,
     QuarkScheme,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
@@ -489,6 +490,92 @@ class QuarkConfig(QuantizationConfig):
             and getattr(torch, "float4_e2m1fn_x2", None) is not None
         )
 
+    def _is_rocfp4(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        """
+        Detect ROCFP4 quantization scheme.
+
+        ROCFP4 uses:
+        - weight: dtype=fp4, group_size=16, scale_type=float8_e5m3, static
+        - input: dtype=fp4, group_size=16, scale_type=float8_e5m3, dynamic
+        """
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            logger.debug(
+                "Quark model is not in ROCFP4 format: "
+                "weight_quant or input_quant not set"
+            )
+            return False
+
+        # Check dtypes - both should be fp4
+        if weight_quant.get("dtype") != "fp4" or input_quant.get("dtype") != "fp4":
+            logger.debug(
+                "Quark model is not in ROCFP4 format: dtype not fp4. "
+                "Got weight dtype=%s, "
+                "input dtype=%s",
+                weight_quant.get("dtype"),
+                input_quant.get("dtype"),
+            )
+            return False
+
+        # Check scale types - both should be float8_e5m3
+        if (
+            weight_quant.get("scale_type") != "float8_e5m3"
+            or input_quant.get("scale_type") != "float8_e5m3"
+        ):
+            logger.debug(
+                "Quark model is not in ROCFP4 format: scale_type not float8_e5m3. "
+                "Got weight scale_type=%s, "
+                "input scale_type=%s",
+                weight_quant.get("scale_type"),
+                input_quant.get("scale_type"),
+            )
+            return False
+
+        # Check group size - both should be 16
+        if weight_quant.get("group_size") != 16 or input_quant.get("group_size") != 16:
+            logger.debug(
+                "Quark model is not in ROCFP4 format: group_size not 16. "
+                "Got weight group_size=%s, "
+                "input group_size=%s",
+                weight_quant.get("group_size"),
+                input_quant.get("group_size"),
+            )
+            return False
+
+        # Check qscheme - both should be per_group
+        if (
+            weight_quant.get("qscheme") != "per_group"
+            or input_quant.get("qscheme") != "per_group"
+        ):
+            logger.debug(
+                "Quark model is not in ROCFP4 format: qscheme not per_group. "
+                "Got weight qscheme=%s, "
+                "input qscheme=%s",
+                weight_quant.get("qscheme"),
+                input_quant.get("qscheme"),
+            )
+            return False
+
+        # Check that weights are static and inputs are dynamic
+        if weight_quant.get("is_dynamic") or not input_quant.get("is_dynamic"):
+            logger.debug(
+                "Quark model is not in ROCFP4 format: "
+                "weight should be static (is_dynamic=False) "
+                "and input should be dynamic (is_dynamic=True). "
+                "Got weight is_dynamic=%s, "
+                "input is_dynamic=%s",
+                weight_quant.get("is_dynamic"),
+                input_quant.get("is_dynamic"),
+            )
+            return False
+
+        logger.info_once("Detected ROCFP4 quantization scheme")
+        return True
+
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module
     ) -> dict[str, Any]:
@@ -568,6 +655,8 @@ class QuarkConfig(QuantizationConfig):
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
             )
+        elif self._is_rocfp4(weight_config, input_config):
+            return QuarkROCFP4()
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX(
                 weight_config,
