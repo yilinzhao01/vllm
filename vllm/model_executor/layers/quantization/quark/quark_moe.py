@@ -10,7 +10,6 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -33,13 +32,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     rocfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4Backend,
-    get_mxfp4_backend,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     MoEPrepareAndFinalizeNoEP,
+)
+from vllm.model_executor.layers.quantization.mxfp4 import (
+    Mxfp4Backend,
+    get_mxfp4_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
@@ -1373,9 +1372,7 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         else:
             raise NotImplementedError("Native RocFP4 MoE kernels not yet implemented")
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.emulate:
             # For simulated path with dequantized weights
             # Still return config to enable dynamic activation quantization
@@ -1394,6 +1391,7 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: Any | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.kernel(
             hidden_states=x,
@@ -1405,4 +1403,5 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            shared_experts_input=shared_experts_input,
         )

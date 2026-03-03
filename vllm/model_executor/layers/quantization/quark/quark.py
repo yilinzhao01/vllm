@@ -430,7 +430,6 @@ class QuarkConfig(QuantizationConfig):
             and getattr(torch, "float4_e2m1fn_x2", None) is not None
         )
 
-
     def _is_rocfp4(
         self,
         weight_quant: dict[str, Any] | None,
@@ -516,7 +515,6 @@ class QuarkConfig(QuantizationConfig):
 
         logger.info_once("Detected ROCFP4 quantization scheme")
         return True
-
 
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module
