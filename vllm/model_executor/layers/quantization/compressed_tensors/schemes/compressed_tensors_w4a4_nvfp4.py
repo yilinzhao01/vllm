@@ -129,16 +129,17 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             )
 
         # Process global scales (CT stores as divisors, i.e. 1/scale)
+        # NOTE: compressed-tensors stores the scales as
+        # `x_fp8_range = x * global_scale`, and `global_scale` is large.
+        # Taking the max is not enough: the fp8 scales should be recomputed accordingly!
         input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(
             (1.0 / input_global_scale_inv).to(torch.float32), requires_grad=False
         )
         weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
-
-        if self.backend != NvFp4LinearBackend.EMULATION:
-            weight_global_scale = 1.0 / weight_global_scale
-
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        layer.weight_global_scale = Parameter(
+            1.0 / weight_global_scale, requires_grad=False
+        )
 
         # Pre-compute alpha and inverse for runtime quantization
         layer.input_global_scale_inv = Parameter(
