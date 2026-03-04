@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import (
     modular_kernel as mk,
 )
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
@@ -39,9 +42,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
-)
-from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
-    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import (
     Mxfp4Backend,
@@ -1701,9 +1701,18 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
 
             # Setup TritonExperts kernel wrapped in modular kernel
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
 
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
+            prepare_finalize = maybe_make_prepare_finalize(
+                moe=self.moe,
+                quant_config=self.moe_quant_config,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                allow_new_interface=True,
+            )
+            assert prepare_finalize is not None
+
+            self.kernel = mk.FusedMoEKernel(
+                prepare_finalize,
                 TritonExperts(
                     moe_config=self.moe,
                     quant_config=self.moe_quant_config,
@@ -1734,7 +1743,8 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: Any | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.kernel(
+        assert self.kernel is not None
+        return self.kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
