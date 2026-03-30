@@ -386,7 +386,6 @@ def convert_to_nvfp4_moe_kernel_format(
                 tensor_sf=w13_scale,
                 global_scale=w13_scale_2,
                 dtype=target_dtype,
-                device=w13.device,
                 block_size=16,
                 swizzle=False,
             )
@@ -398,7 +397,6 @@ def convert_to_nvfp4_moe_kernel_format(
                 tensor_sf=w2_scale,
                 global_scale=w2_scale_2,
                 dtype=target_dtype,
-                device=w2.device,
                 block_size=16,
                 swizzle=False,
             )
