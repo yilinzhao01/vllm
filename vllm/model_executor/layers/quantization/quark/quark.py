@@ -5,6 +5,7 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -38,7 +39,6 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
-from vllm.transformers_utils.config import get_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
+
+# model_type values that use dynamic MXFP4 re-quantization for
+# OCP MX fp4 Quark checkpoints
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
 
 
 class QuarkConfig(QuantizationConfig):
@@ -67,13 +71,19 @@ class QuarkConfig(QuantizationConfig):
         self.dynamic_mxfp4_quant = False
         self.emulation_dequantize_weights = emulation_dequantize_weights
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
-        self.hf_config = get_config(
-            model=model_name,
-            trust_remote_code=False,  # or get from model_config if available
-            revision=revision,
-            config_format="auto",
-        )
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
+
+        if (
+            getattr(hf_config, "model_type", None)
+            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
+        ):
+            return
 
         quant_config = getattr(self.hf_config, "quantization_config", None)
         if quant_config is not None:

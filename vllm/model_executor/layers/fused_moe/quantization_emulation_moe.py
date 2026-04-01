@@ -121,29 +121,26 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             # Dequantize w1 from packed NVFP4 to fp16/bf16
             w13_global_scale = self.quant_config.g1_alphas
 
-            w1_dequant = dequantize_to_dtype(
-                tensor_fp4=w1,
-                tensor_sf=self.w1_scale_val,
-                global_scale=w13_global_scale,
-                dtype=hidden_states.dtype,
-                device=w1.device,
-                block_size=16,
-                swizzle=False,
-            )
+		    w1_dequant = dequantize_to_dtype(
+		        tensor_fp4=w1,
+		        tensor_sf=self.w1_scale_val,
+		        global_scale=w13_global_scale,
+		        dtype=hidden_states.dtype,
+		        block_size=16,
+		        swizzle=False,
+		    )
 
             # Dequantize w2 from packed NVFP4 to fp16/bf16
             w2_global_scale = self.quant_config.g2_alphas
 
-            w2_dequant = dequantize_to_dtype(
-                tensor_fp4=w2,
-                tensor_sf=self.w2_scale_val,
-                global_scale=w2_global_scale,
-                dtype=hidden_states.dtype,
-                device=w2.device,
-                block_size=16,
-                swizzle=False,
-            )
-
+		    w2_dequant = dequantize_to_dtype(
+		        tensor_fp4=w2,
+		        tensor_sf=self.w2_scale_val,
+		        global_scale=w2_global_scale,
+		        dtype=hidden_states.dtype,
+		        block_size=16,
+		        swizzle=False,
+		    )
         assert w1_dequant.dtype == hidden_states.dtype
         assert w2_dequant.dtype == hidden_states.dtype
 
