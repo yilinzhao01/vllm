@@ -259,7 +259,6 @@ def convert_to_nvfp4_linear_kernel_format(
                 tensor_sf=layer.weight_scale.data,
                 global_scale=layer.weight_global_scale,
                 dtype=target_dtype,
-                device=layer.weight.device,
                 block_size=16,
                 swizzle=False,  # No swizzle for emulation backend
             )
