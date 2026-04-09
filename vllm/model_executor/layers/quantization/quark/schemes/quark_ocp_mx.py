@@ -213,10 +213,10 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         # TODO: integrate (or test) mixed-precision kernel.
-        # self.emulate = not current_platform.supports_mx() or (
-        #     self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
-        # )
-        self.emulate = True
+        self.emulate = not current_platform.supports_mx() or (
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        )
+
         self.emulation_dequantize_weights = emulation_dequantize_weights
         if self.emulation_dequantize_weights:
             logger.info_once(
@@ -275,6 +275,13 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def process_dynamic_mxfp4_weights_after_loading(
+        self, layer: torch.nn.Module
+    ) -> None:
+        w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
@@ -291,11 +298,7 @@ class QuarkOCP_MX(QuarkScheme):
                 layer.weight_scale = None
         else:
             if self.dynamic_mxfp4_quant:
-                w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-                layer.weight_scale = torch.nn.Parameter(
-                    w_s.T.contiguous(), requires_grad=False
-                )
-                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
+                self.process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
@@ -386,7 +389,7 @@ class QuarkOCP_MX(QuarkScheme):
                 dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             else:
                 dq_w = layer.weight
-            
+
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         else:

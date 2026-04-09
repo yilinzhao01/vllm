@@ -80,6 +80,27 @@ def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]
         supported = has_fbgemm_gpu()
         if not supported:
             reason = "fbgemm_gpu is required"
+    elif backend == NvFp4LinearBackend.EMULATION:
+        # e.g. AMD Instinct does not support native NVFP4.
+        unsupported_reasons = {}
+        for other_backend in NVFP4_LINEAR_BACKENDS:
+            if other_backend == NvFp4LinearBackend.EMULATION:
+                continue
+            other_supported, other_reason = is_backend_supported(other_backend)
+            if not other_supported:
+                unsupported_reasons[other_backend] = other_reason
+
+        if unsupported_reasons:
+            unsupported_reasons_str = "\n - ".join(
+                [f"{b.value}: {r}" for b, r in unsupported_reasons.items()]
+            )
+            logger.warning_once(
+                f"NVFP4 linear falling back to the slow and unoptimized "
+                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
+                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
+                "In case you expect one of these backend to be used, "
+                "please verify your environment."
+            )
 
     return supported, reason
 
@@ -89,6 +110,13 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     Select the best available NVFP4 GEMM backend based on environment
     configuration and platform capabilities.
     """
+    if envs.VLLM_BATCH_INVARIANT:
+        logger.info_once(
+            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the emulation "
+            "backend for deterministic execution."
+        )
+        return NvFp4LinearBackend.EMULATION
+
     selected_backend: NvFp4LinearBackend | None = None
 
     if envs.VLLM_USE_FBGEMM:
@@ -103,30 +131,11 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         selected_backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
-        unsupported_reasons = {}
         for backend in NVFP4_LINEAR_BACKENDS:
             supported, reason = is_backend_supported(backend)
             if supported:
                 selected_backend = backend
                 break
-            else:
-                unsupported_reasons[backend] = reason
-
-        if selected_backend == NvFp4LinearBackend.EMULATION:
-            # e.g. AMD Instinct does not support native NVFP4.
-            unsupported_reasons_str = "\n - ".join(
-                [
-                    f"{backend.value}: {reason}"
-                    for backend, reason in unsupported_reasons.items()
-                ]
-            )
-            logger.warning_once(
-                f"NVFP4 linear falling back to the slow and unoptimized "
-                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
-                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
-                "In case you expect one of these backend to be used, "
-                "please verify your environment."
-            )
     else:
         selected_backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
 
@@ -285,6 +294,8 @@ def apply_nvfp4_linear(
     alpha = layer.alpha
     output_size = layer.output_size_per_partition
     input_size = layer.input_size_per_partition
+    output_dtype = x.dtype
+    output_shape = [*x.shape[:-1], output_size]
 
     if backend == NvFp4LinearBackend.MARLIN:
         return apply_fp4_marlin_linear(
@@ -298,20 +309,19 @@ def apply_nvfp4_linear(
             bias=bias,
         )
     elif backend == NvFp4LinearBackend.EMULATION:
+        x_2d = x.reshape(-1, x.shape[-1])
         out = run_nvfp4_emulations(
-            x=x,
+            x=x_2d,
             input_global_scale=input_global_scale_inv,
             weight=weight,
             weight_scale_swizzled=weight_scale,
             weight_global_scale=weight_global_scale,
             swizzle=swizzle,
         )
+        out = out[:, :output_size]
         if bias is not None:
             out = out + bias
-        return out
-
-    output_dtype = x.dtype
-    output_shape = [*x.shape[:-1], output_size]
+        return out.view(*output_shape)
 
     # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = scaled_fp4_quant(

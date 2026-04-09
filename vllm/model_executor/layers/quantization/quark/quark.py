@@ -85,15 +85,16 @@ class QuarkConfig(QuantizationConfig):
         ):
             return
 
-        quant_config = getattr(self.hf_config, "quantization_config", None)
+        quant_config = getattr(hf_config, "quantization_config", None)
         if quant_config is not None:
-            model_type = self.hf_config.model_type
-
             # global_quant_config's weight may be a list for NVFP4.
-            if not isinstance(quant_config["global_quant_config"]["weight"], list):
-                quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
-                model_type = self.hf_config.model_type
-                if quant_dtype == "fp4" and model_type == "deepseek_v3":
+            weight_config = quant_dtype = quant_config.get(
+                "global_quant_config", {}
+            ).get("weight", [])
+
+            if not isinstance(weight_config, list):
+                quant_dtype = weight_config["dtype"]
+                if quant_dtype == "fp4":
                     self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
@@ -437,7 +438,7 @@ class QuarkConfig(QuantizationConfig):
         is_fp8_per_tensor_input = (
             input_quant[1].get("dtype") == "fp8_e4m3"
             and input_quant[1].get("qscheme") == "per_tensor"
-            and input_quant[1].get("is_dynamic")
+            and not input_quant[1].get("is_dynamic")
         )
 
         return (

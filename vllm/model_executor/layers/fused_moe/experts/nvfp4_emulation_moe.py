@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Quantization Emulation Experts for MoE.
+NVFP4 quantization emulation for MoE.
 
-This module provides emulation support for MOE quantization schemes that
-don't have native hardware support. It dequantizes weights on the fly
-and falls back to calling fused_experts with activation quantization.
+This file implements NVFP4 emulation for NVFP4 MOE in case the hardware used does not
+natively support NVFP4 MOE.
 
-Similar to QuarkOCP_MX_MoEMethod's emulation path but abstracted into
-a reusable NvFp4MoeBackend.
+Weights are dequantized on the fly during each forward, we fall back to calling
+`TritonExperts` using BF16, and fake NVFP4 quantize-dequantize
+is applied on `a13`, `a2`.
 """
 
 import torch
@@ -36,7 +36,7 @@ logger = init_logger(__name__)
 
 class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     """
-    Emulation backend for NVFP4 quantized MoE experts.
+    Extension of TritonExperts to support emulated NVFP4 MoE experts.
 
     It may be used for NVFP4 models when the device does not have
     native support for this dtype.
@@ -63,7 +63,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
 
-        self.emulation = True
+        self.quantization_emulation = True
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -150,7 +150,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             A_scale=self.quant_config.a1_gscale,
             quant_dtype="nvfp4",
             per_act_token_quant=False,
-            emulation=True,
+            quantization_emulation=True,
         )
 
         # Activation quantization/dequantization is deferred to

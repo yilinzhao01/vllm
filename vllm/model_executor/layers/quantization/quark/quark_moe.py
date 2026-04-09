@@ -8,8 +8,9 @@ import torch
 from quark.torch.utils.pack import Pack_fp4
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -19,9 +20,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     MoEActivation,
-)
-from vllm.model_executor.layers.fused_moe import (
-    modular_kernel as mk,
 )
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -37,6 +35,16 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    TRITON_BACKENDS,
+    Mxfp4MoeBackend,
+    backend_to_kernel_cls,
+    convert_to_mxfp4_moe_kernel_format,
+    make_mxfp4_moe_kernel,
+    make_mxfp4_moe_quant_config,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
+    select_mxfp4_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
@@ -44,19 +52,12 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    Mxfp4MoeBackend,
-    mxfp4_round_up_hidden_size_and_intermediate_size,
-    select_mxfp4_moe_backend,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
-    dequant_mxfp4,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -109,12 +110,13 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
-        if quant_config._is_nvfp4(weight_config, input_config):
+
+        if quant_config._is_fp8_w4a8(weight_config, input_config):
+            return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+        elif quant_config._is_nvfp4(weight_config, input_config):
             return QuarkNvfp4MoEMethod(
                 weight_config, input_config, module.moe_config, quant_config
             )
-        elif quant_config._is_fp8_w4a8(weight_config, input_config):
-            return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
@@ -132,10 +134,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 )
             else:
                 return QuarkOCP_MX_MoEMethod(
-                    weight_config,
-                    input_config,
-                    module.moe_config,
-                    emulation_dequantize_weights=quant_config.emulation_dequantize_weights,
+                    weight_config, input_config, module.moe_config
                 )
         elif quant_config._is_rocfp4(weight_config, input_config):
             return Quark_rocFP4_MoEMethod(
@@ -481,7 +480,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 rocm_aiter_fused_experts,
@@ -671,7 +670,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             rocm_aiter_fused_experts,
         )
@@ -737,12 +736,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"Please check that the combination is supported in OCP_MX_Scheme."
             )
 
-        self.mxfp4_backend: Mxfp4MoeBackend | None = None
-        if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
-        elif self.ocp_mx_scheme.startswith("w_mxfp4"):
-            # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes.
-            self.mxfp4_backend = Mxfp4MoeBackend.NONE
+        # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes,
+        # use kernel abstraction for all OCP MX MOE implementations.
+        self.mxfp4_backend: Mxfp4MoeBackend = Mxfp4MoeBackend.NONE
+
+        self.experts_cls: type[mk.FusedMoEExperts] | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
+
+        # Used for triton kernel precision configs
+        self.w13_precision_config = None
+        self.w2_precision_config = None
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
@@ -776,16 +779,28 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             not current_platform.supports_mx()
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (
-            self.mxfp4_backend is None
-            or self.mxfp4_backend is Mxfp4MoeBackend.NONE
-            or not self.use_rocm_aiter_moe
+            self.mxfp4_backend is Mxfp4MoeBackend.NONE or not self.use_rocm_aiter_moe
         )
+
+        if self.ocp_mx_scheme == "w_mxfp4":
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+
+        if self.emulate:
+            # We use the same code path between MXFP4/MXFP6 emulation.
+            self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+
+        # TODO: Remove `self.mxfp4_backend != Mxfp4MoeBackend.NONE` and make it so that
+        # all MXFP4 backends use the kernel abstraction.
+        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+
         self.emulation_dequantize_weights = emulation_dequantize_weights
         if self.emulation_dequantize_weights:
             logger.info_once(
                 "QuarkOCP_MX_MoEMethod simulated MOE layers: "
                 "dequantizing weights ahead of time."
             )
+
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
@@ -814,7 +829,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        if self.mxfp4_backend is not None:
+        if (
+            self.mxfp4_backend is not None
+            and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
+        ):
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition
@@ -987,19 +1005,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                         w2_input_scale, requires_grad=False
                     )
 
-        # secondly, process mxfp weights
-        if self.emulate:
-            if self.emulation_dequantize_weights:
-                w1, w2 = self.dequantize_weights(layer, dtype=torch.get_default_dtype())
-
-                layer.w13_weight = torch.nn.Parameter(w1, requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
-                layer.w13_weight_scale = None
-                layer.w2_weight_scale = None
-
-            torch.accelerator.empty_cache()
+        # For w_mxfp4, use oracle functions
+        if self.emulate or (
+            self.ocp_mx_scheme == "w_mxfp4"
+            and self.mxfp4_backend != Mxfp4MoeBackend.NONE
+        ):
+            self._setup_kernel_via_oracle(layer)
             return
 
+        # Existing AITER path for w_mxfp4_a_mxfp4 and other schemes
         from aiter.utility.fp4_utils import e8m0_shuffle
 
         # Pre-shuffle weight scales
@@ -1031,11 +1045,85 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
+
+        # Build quant config for AITER path
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         torch.accelerator.empty_cache()
+
+    def _setup_kernel_via_oracle(self, layer: FusedMoE):
+        """Setup kernel using oracle functions for w_mxfp4 scheme."""
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        w13_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
+
+        # Convert weights to kernel format
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+            convert_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+            )
+        )
+
+        # For TRITON backends, weights are wrapped tensors from triton_kernels
+        # that don't support .detach(). Manually assign parameters.
+        if self.mxfp4_backend not in TRITON_BACKENDS:
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+        else:
+            layer.w13_weight = w13
+            layer.w2_weight = w2
+            self.w13_precision_config = w13_scale
+            self.w2_precision_config = w2_scale
+
+        if w13_bias is not None and w2_bias is not None:
+            replace_parameter(layer, "w13_bias", w13_bias)
+            replace_parameter(layer, "w2_bias", w2_bias)
+
+        # Build quant config and kernel
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        # For w_mxfp4 with oracle backend, use oracle function
+        if self.ocp_mx_scheme == "w_mxfp4" and self.mxfp4_backend not in (
+            Mxfp4MoeBackend.NONE,
+            Mxfp4MoeBackend.EMULATION,
+        ):
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+            if self.mxfp4_backend in TRITON_BACKENDS:
+                w1_scale = self.w13_precision_config
+                w2_scale = self.w2_precision_config
+            return make_mxfp4_moe_quant_config(
+                mxfp4_backend=self.mxfp4_backend,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_bias=getattr(layer, "w13_bias", None),
+                w2_bias=getattr(layer, "w2_bias", None),
+            )
+
+        # Emulation and other schemes
         if self.ocp_mx_scheme == "w_mxfp4":
             return mxfp4_w4a16_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,
@@ -1071,32 +1159,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 block_shape=None,
             )
 
-    def dequantize_weights(self, layer, dtype):
-        w1 = layer.w13_weight
-        w2 = layer.w2_weight
-        w1_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
-
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        }:
-            # Weight has to be dequantized for mxfp4 emulation.
-            w1 = dequant_mxfp4(w1, w1_scale, dtype)
-            w2 = dequant_mxfp4(w2, w2_scale, dtype)
-        elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
-            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
-            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
-        elif self.ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
-            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
-            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
-        else:
-            raise NotImplementedError(  # noqa: E501
-                f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}"
-            )
-
-        return w1, w2
+    @property
+    def is_monolithic(self) -> bool:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.is_monolithic
+        return False
 
     def apply(
         self,
@@ -1105,46 +1172,58 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if not self.emulate:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                rocm_aiter_fused_experts,
-            )
-
-            return rocm_aiter_fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
+    ) -> torch.Tensor:
+        # For oracle kernel or emulation kernel
+        if self.moe_kernel is not None:
+            return self.moe_kernel.apply(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=layer.activation,
-                quant_config=self.moe_quant_config,
-                moe_config=layer.moe_config,
-                expert_map=layer.expert_map,
-            )
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            if not self.emulation_dequantize_weights:
-                w1, w2 = self.dequantize_weights(layer, dtype=x.dtype)
-            else:
-                w1 = layer.w13_weight
-                w2 = layer.w2_weight
-
-            # TODO: Use `TritonExperts` and `TritonExperts.apply` here.
-            return fused_experts(
-                x,
-                w1,
-                w2,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=not self.moe.disable_inplace,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
+                shared_experts_input=shared_experts_input,
             )
+
+        # AITER path
+        # TODO: Refactor this to use modular MOE kernel as well.
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            rocm_aiter_fused_experts,
+        )
+
+        return rocm_aiter_fused_experts(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            quant_config=self.moe_quant_config,
+            moe_config=layer.moe_config,
+            expert_map=layer.expert_map,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
 
 class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):

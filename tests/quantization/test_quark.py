@@ -265,10 +265,9 @@ def test_ocp_mx_wikitext_correctness(
 )
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_nvfp4_wikitext_correctness(tp_size: int):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(
-            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
-        )
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
 
     # model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
@@ -279,7 +278,7 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
 
     # TODO: rtol should be much smaller! But there is likely a bug in Quark
     # NVFP4 model (MOE down_proj activation scales)
-    rtol = 2
+    rtol = 0.25
 
     config = AccuracyTestConfig(
         model_name=model_name,

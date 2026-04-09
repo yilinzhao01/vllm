@@ -1666,6 +1666,12 @@ def fused_experts_impl(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if ocp_mx_scheme is not None:
+        raise NotImplementedError(
+            f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
+            "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
+        )
+
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
 
@@ -1696,7 +1702,6 @@ def fused_experts_impl(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
-        ocp_mx_scheme=ocp_mx_scheme,
         dtype=hidden_states.dtype,
     )
 
@@ -1705,7 +1710,7 @@ def fused_experts_impl(
     quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
-        ocp_mx_scheme=ocp_mx_scheme,
+        ocp_mx_scheme=None,
         use_rocfp4=use_rocfp4,
     )
 
@@ -1757,7 +1762,6 @@ def fused_experts_impl(
         quant_dtype=quant_dtype,
         per_act_token_quant=per_channel_quant,
         block_shape=block_shape,
-        ocp_mx_scheme=ocp_mx_scheme,
     )
 
     # SPARSITY_FACTOR is a heuristic margin ensuring num_tokens * top_k
@@ -1825,7 +1829,6 @@ def fused_experts_impl(
         quant_dtype=quant_dtype,
         per_act_token_quant=per_channel_quant,
         block_shape=block_shape,
-        ocp_mx_scheme=ocp_mx_scheme,
     )
 
     if expert_map is not None:
@@ -1871,7 +1874,9 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        self.emulation = False
+        # Whether quantized MOE runs natively, or through
+        # higher-precision + activation QDQ.
+        self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
 
     @staticmethod
@@ -1893,14 +1898,17 @@ class TritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9
+            from vllm.platforms.rocm import on_gfx9, on_gfx12x
 
             is_rocm_on_gfx9 = on_gfx9()
+            is_rocm_on_gfx12x = on_gfx12x()
         else:
             is_rocm_on_gfx9 = False
+            is_rocm_on_gfx12x = False
 
         device_supports_fp8 = (
             is_rocm_on_gfx9
+            or is_rocm_on_gfx12x
             or (p.is_cuda() and p.has_device_capability((8, 9)))
             or p.is_xpu()
         )
@@ -2079,7 +2087,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
-            emulation=self.emulation,
+            quantization_emulation=self.quantization_emulation,
         )
 
         invoke_fused_moe_triton_kernel(
