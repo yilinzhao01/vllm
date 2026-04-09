@@ -134,7 +134,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 )
             else:
                 return QuarkOCP_MX_MoEMethod(
-                    weight_config, input_config, module.moe_config
+                    weight_config, input_config, module.moe_config, emulation_dequantize_weights=quant_config.emulation_dequantize_weights
                 )
         elif quant_config._is_rocfp4(weight_config, input_config):
             return Quark_rocFP4_MoEMethod(
@@ -1070,6 +1070,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
+                emulation_dequantize_weights=self.emulation_dequantize_weights,
+                ocp_mx_scheme=self.ocp_mx_scheme,
             )
         )
 
