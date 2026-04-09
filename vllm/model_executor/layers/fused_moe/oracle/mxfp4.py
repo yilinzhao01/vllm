@@ -20,7 +20,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4,
+    dequant_mxfp4,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -421,6 +426,8 @@ def convert_to_mxfp4_moe_kernel_format(
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    ocp_mx_scheme: OCP_MX_Scheme | None = None,
+    emulation_dequantize_weights: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -776,6 +783,33 @@ def convert_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
         # No additional transformation needed for emulation backend,
         # weights are dequantized on the fly in the experts class.
+        if emulation_dequantize_weights:
+            dtype = torch.get_default_dtype()
+
+            if ocp_mx_scheme in {
+                OCP_MX_Scheme.w_mxfp4_a_mxfp4,
+                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+                OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+            }:
+                # Weight has to be dequantized for mxfp4 emulation.
+                w13_weight = dequant_mxfp4(w13_weight, w13_weight_scale, dtype)
+                w2_weight = dequant_mxfp4(w2_weight, w2_weight_scale, dtype)
+            elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+                w13_weight = dequant_mxfp6(w13_weight, w13_weight_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+                w2_weight = dequant_mxfp6(w2_weight, w2_weight_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+            elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+                w13_weight = dequant_mxfp6(w13_weight, w13_weight_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
+                w2_weight = dequant_mxfp6(w2_weight, w2_weight_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
+            else:
+                raise NotImplementedError(  # noqa: E501
+                    f"Unsupported ocp_mx_scheme={ocp_mx_scheme}"
+                )
+
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            layer.w13_weight_scale = None
+            layer.w2_weight_scale = None
+
         return (
             w13_weight,
             w2_weight,

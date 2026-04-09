@@ -151,6 +151,7 @@ class QuarkNVFP4(QuarkScheme):
         convert_to_nvfp4_linear_kernel_format(
             self.backend,
             layer,
+            emulation_dequantize_weights=self.emulation_dequantize_weights,
         )
         del layer.weight_scale_2
 
