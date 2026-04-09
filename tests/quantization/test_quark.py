@@ -283,8 +283,6 @@ def test_nvfp4_wikitext_correctness(tp_size: int, emulation_dequantize_weights: 
     model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     task = "wikitext"
 
-    # TODO: rtol should be much smaller! But there is likely a bug in Quark
-    # NVFP4 model (MOE down_proj activation scales)
     rtol = 0.25
 
     config = AccuracyTestConfig(
