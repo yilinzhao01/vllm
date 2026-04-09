@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mx
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
+
 logger = init_logger(__name__)
 
 
@@ -72,9 +73,17 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         }:
             # Weight has to be dequantized for mxfp4 emulation.
             self._quant_dtype = "mxfp4"
-        elif self.ocp_mx_scheme in [OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2, OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3, OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2, OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3]:
+        elif self.ocp_mx_scheme in [
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+        ]:
             self._quant_dtype = "mxfp6"
-        elif self.ocp_mx_scheme in [OCP_MX_Scheme.w_mxfp4_a_fp8, OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8]:
+        elif self.ocp_mx_scheme in [
+            OCP_MX_Scheme.w_mxfp4_a_fp8,
+            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        ]:
             # TODO: double check this one
             self._quant_dtype = "mxfp8"
 
@@ -135,11 +144,15 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         This dequantizes the weights on the fly and calls TritonExperts.apply
         with activation quantization support.
         """
-        
+
         if w1.dtype == torch.uint8 and w2.dtype == torch.uint8:
             # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-            w1_dequant = self._dequant_weights(w1, self.w1_scale_val, hidden_states.dtype)
-            w2_dequant = self._dequant_weights(w2, self.w2_scale_val, hidden_states.dtype)
+            w1_dequant = self._dequant_weights(
+                w1, self.w1_scale_val, hidden_states.dtype
+            )
+            w2_dequant = self._dequant_weights(
+                w2, self.w2_scale_val, hidden_states.dtype
+            )
         else:
             assert w1.dtype == hidden_states.dtype
             assert w2.dtype == hidden_states.dtype
