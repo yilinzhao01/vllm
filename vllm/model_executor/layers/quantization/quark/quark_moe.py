@@ -1150,8 +1150,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             return ocp_mx_moe_quant_config(
                 quant_dtype=self.input_dtype,
                 weight_dtype=self.weight_dtype,
-                w1_scale=layer.w13_weight_scale if not self.emulate else None,
-                w2_scale=layer.w2_weight_scale if not self.emulate else None,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 a1_scale=None,

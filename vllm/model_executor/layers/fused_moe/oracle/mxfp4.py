@@ -810,6 +810,8 @@ def convert_to_mxfp4_moe_kernel_format(
             layer.w13_weight_scale = None
             layer.w2_weight_scale = None
 
+        assert w13_weight_scale is not None
+        assert w2_weight_scale is not None
         return (
             w13_weight,
             w2_weight,

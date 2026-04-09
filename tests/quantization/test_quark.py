@@ -264,7 +264,14 @@ def test_ocp_mx_wikitext_correctness(
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_nvfp4_wikitext_correctness(tp_size: int):
+@pytest.mark.parametrize(
+    "emulation_dequantize_weights",
+    [
+        pytest.param(val, id=f"emulation_dequantize_weights:{val}")
+        for val in [True, False]
+    ],
+)
+def test_nvfp4_wikitext_correctness(tp_size: int, emulation_dequantize_weights: bool):
     device_count = torch.accelerator.device_count()
     if device_count < tp_size:
         pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
@@ -289,6 +296,11 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
         tp_size=tp_size,
         kwargs={
             "cudagraph_capture_sizes": [16],
+            "hf_overrides": {
+                "quantization_config": {
+                    "emulation_dequantize_weights": emulation_dequantize_weights
+                }
+            },
         },
     )
     model_args.pop("add_bos_token")

@@ -122,12 +122,17 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         This dequantizes the weights on the fly and calls TritonExperts.apply
         with activation quantization support.
         """
-        assert w1.dtype == torch.uint8
-        assert w2.dtype == torch.uint8
-
-        # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-        w1_dequant = self._dequant_weights(w1, self.w1_scale_val, hidden_states.dtype)
-        w2_dequant = self._dequant_weights(w2, self.w2_scale_val, hidden_states.dtype)
+        
+        if w1.dtype == torch.uint8 and w2.dtype == torch.uint8:
+            # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
+            w1_dequant = self._dequant_weights(w1, self.w1_scale_val, hidden_states.dtype)
+            w2_dequant = self._dequant_weights(w2, self.w2_scale_val, hidden_states.dtype)
+        else:
+            assert w1.dtype == hidden_states.dtype
+            assert w2.dtype == hidden_states.dtype
+            
+            w1_dequant = w1
+            w2_dequant = w2
 
         # Apply activation QDQ if needed by the OCP MX scheme
         hidden_states, _ = moe_kernel_quantize_input(
