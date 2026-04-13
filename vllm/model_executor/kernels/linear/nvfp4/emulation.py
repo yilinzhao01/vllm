@@ -9,9 +9,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     kE2M1ToFloat_handle,
     run_nvfp4_emulations,
 )
-
+from vllm.logger import init_logger
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
-
+logger = init_logger(__name__)
 
 class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
     """Software emulation fallback for NVFP4 (dequant → BF16 matmul)."""
@@ -33,6 +33,8 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
 
         if layer.emulation_dequantize_weights:
+            logger.warning_once("Dequantizing NVFP4 linear weights ahead of time with emulation_dequantize_weights=True.")
+            
             dq_w = dequantize_to_dtype(
                 tensor_fp4=layer.weight,
                 tensor_sf=layer.weight_scale,
