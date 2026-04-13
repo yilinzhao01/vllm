@@ -795,11 +795,31 @@ def convert_to_mxfp4_moe_kernel_format(
                 w13_weight = dequant_mxfp4(w13_weight, w13_weight_scale, dtype)
                 w2_weight = dequant_mxfp4(w2_weight, w2_weight_scale, dtype)
             elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
-                w13_weight = dequant_mxfp6(w13_weight, w13_weight_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
-                w2_weight = dequant_mxfp6(w2_weight, w2_weight_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+                w13_weight = dequant_mxfp6(
+                    w13_weight,
+                    w13_weight_scale,
+                    quant_dtype="fp6_e3m2",
+                    float_dtype=dtype,
+                )
+                w2_weight = dequant_mxfp6(
+                    w2_weight,
+                    w2_weight_scale,
+                    quant_dtype="fp6_e3m2",
+                    float_dtype=dtype,
+                )
             elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
-                w13_weight = dequant_mxfp6(w13_weight, w13_weight_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
-                w2_weight = dequant_mxfp6(w2_weight, w2_weight_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
+                w13_weight = dequant_mxfp6(
+                    w13_weight,
+                    w13_weight_scale,
+                    quant_dtype="fp6_e2m3",
+                    float_dtype=dtype,
+                )
+                w2_weight = dequant_mxfp6(
+                    w2_weight,
+                    w2_weight_scale,
+                    quant_dtype="fp6_e2m3",
+                    float_dtype=dtype,
+                )
             else:
                 raise NotImplementedError(  # noqa: E501
                     f"Unsupported ocp_mx_scheme={ocp_mx_scheme}"
