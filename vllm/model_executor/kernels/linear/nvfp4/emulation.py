@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
     kE2M1ToFloat_handle,
     run_nvfp4_emulations,
 )
@@ -29,6 +31,18 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         # Move the E2M1 lookup table to the device now, because
         # `.to(device)` is not allowed during CUDA graph capture.
         kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
+
+        if layer.emulation_dequantize_weights:
+            dq_w = dequantize_to_dtype(
+                tensor_fp4=layer.weight,
+                tensor_sf=layer.weight_scale,
+                global_scale=layer.weight_global_scale,
+                dtype=torch.get_default_dtype(),
+                block_size=16,
+                swizzle=False,
+            )
+            layer.weight = nn.Parameter(dq_w, requires_grad=False)
+            layer.weight_scale = None
 
     def apply_weights(
         self,

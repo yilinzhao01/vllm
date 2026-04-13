@@ -145,6 +145,7 @@ class QuarkNVFP4(QuarkScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
+        layer.emulation_dequantize_weights = self.emulation_dequantize_weights
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
