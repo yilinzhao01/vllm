@@ -104,7 +104,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         # directly rather than via quant scheme matching.
         return True
 
-    def _dequant_weights(
+    def _dequantize_weights(
         self,
         w: torch.Tensor,
         w_scale: torch.Tensor,
@@ -147,10 +147,10 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         if w1.dtype == torch.uint8 and w2.dtype == torch.uint8:
             # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-            w1_dequant = self._dequant_weights(
+            w1_dequant = self._dequantize_weights(
                 w1, self.w1_scale_val, hidden_states.dtype
             )
-            w2_dequant = self._dequant_weights(
+            w2_dequant = self._dequantize_weights(
                 w2, self.w2_scale_val, hidden_states.dtype
             )
         else:
