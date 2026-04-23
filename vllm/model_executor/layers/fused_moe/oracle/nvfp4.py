@@ -409,7 +409,10 @@ def convert_to_nvfp4_moe_kernel_format(
         a2_scale = 1.0 / a2_scale.max().to(torch.float32)
 
         if emulation_dequantize_weights:
-            logger.warning_once("Dequantizing NVFP4 MOE weights ahead of time with emulation_dequantize_weights=True.")
+            logger.warning_once(
+                "Dequantizing NVFP4 MOE weights ahead of time with "
+                "emulation_dequantize_weights=True."
+            )
 
             # For emulation backend, optionally dequantize weights ahead of time
             target_dtype = torch.get_default_dtype()
