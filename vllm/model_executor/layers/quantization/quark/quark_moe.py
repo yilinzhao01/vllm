@@ -3,7 +3,10 @@
 
 from typing import Any
 
+import quark.torch.kernel
 import torch
+from quark.torch.utils.pack import Pack_fp4
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -23,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
+    rocfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.mxfp4 import (
@@ -49,7 +53,12 @@ from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
-__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkOCP_MX_MoEMethod"]
+__all__ = [
+    "QuarkMoEMethod",
+    "QuarkW8A8Fp8MoEMethod",
+    "QuarkOCP_MX_MoEMethod",
+    "Quark_rocFP4_MoEMethod",
+]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -77,6 +86,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+        elif quant_config._is_rocfp4(weight_config, input_config):
+            return Quark_rocFP4_MoEMethod(
+                weight_config, input_config, module.moe_config
+            )
         elif quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
         else:
@@ -1031,3 +1044,218 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
+
+
+class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
+    """
+    Quark rocFP4 MoE quantization method.
+
+    Supports loading RocFP4 checkpoints with the following structure:
+    - Weights: FP4 packed in uint8 (2 values per byte)
+    - Scales: bfloat16, per-group (group_size=16)
+    - Dynamic rocFP4 activation quantization.
+    """
+
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
+        self.weight_quant = weight_config
+        self.input_quant = input_config
+
+        self.group_size = 16
+
+        # TODO: implement non-emulation code path.
+        self.emulate = True
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.group_size = self.group_size
+
+        # Set weight block size for FusedMoE weight loader
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
+        )
+
+        weight_params_dtype = torch.uint8  # Packed FP4 stored as uint8
+
+        # W13 WEIGHT: FP4 packed as uint8 (2 FP4 values per byte)
+        # Shape: [num_experts, 2*intermediate_size, hidden_size // 2]
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,  # Packed dimension
+                dtype=weight_params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        # W2 WEIGHT: FP4 packed as uint8
+        # Shape: [num_experts, hidden_size, intermediate_size // 2]
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,  # Packed dimension
+                dtype=weight_params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # W13 WEIGHT SCALES: bfloat16 per-group scales
+        # Shape: [num_experts, 2*intermediate_size, hidden_size // 16]
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.group_size,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        # W2 WEIGHT SCALES: bfloat16 per-group scales
+        # Shape: [num_experts, hidden_size, intermediate_size // 16]
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.group_size,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.emulate:
+            packing_instance = Pack_fp4(None, "fp4")
+
+            # Scales are bfloat16 in the ckpt; cast to fp32 for the quark
+            # fp4 dequantize kernel which expects float scales.
+            w13_scale_dq = layer.w13_weight_scale.data.to(torch.float32)
+            w13_unpacked = packing_instance.unpack(
+                layer.w13_weight.data,
+                reorder=None,
+            )
+
+            # Dequantize FP4 weights using FP32 scales
+            w13_dq = quark.torch.kernel.dequantize(
+                "fp4",
+                w13_unpacked,
+                w13_scale_dq,
+                None,
+                -1,
+                self.group_size,
+                "per_group",
+            )
+            w13_dq = w13_dq.to(layer.orig_dtype)
+
+            layer.w13_weight = Parameter(w13_dq, requires_grad=False)
+            layer.w13_weight_scale = None
+
+            # Process w2_weight (same process)
+            w2_scale_dq = layer.w2_weight_scale.data.to(torch.float32)
+            w2_unpacked = packing_instance.unpack(
+                layer.w2_weight.data,
+                reorder=None,
+            )
+
+            w2_dq = quark.torch.kernel.dequantize(
+                "fp4",
+                w2_unpacked,
+                w2_scale_dq,
+                None,
+                -1,
+                self.group_size,
+                "per_group",
+            )
+            w2_dq = w2_dq.to(layer.orig_dtype)
+
+            layer.w2_weight = Parameter(w2_dq, requires_grad=False)
+            layer.w2_weight_scale = None
+
+            # Cache the rocfp4 quant config; apply() passes it to
+            # `fused_experts` so that `moe_kernel_quantize_input` calls
+            # `_rocfp4_quantize` at the input and intermediate stages. The
+            # remaining triton MoE kernel call is identical to the bf16 path
+            # (quant_dtype only triggers the QDQ branch; tile config falls
+            # through to the default bf16 tile because dtype-to-config maps
+            # rocfp4 -> None).
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+        else:
+            raise NotImplementedError(
+                "Native RocFP4 MoE kernels not yet implemented"
+            )
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        if self.emulate:
+            # For simulated path with dequantized weights.
+            # Still return config to enable dynamic activation quantization.
+            return rocfp4_moe_quant_config(
+                w1_scale=None,  # Weights already dequantized
+                w2_scale=None,
+                a1_scale=None,  # Dynamic quantization
+                a2_scale=None,
+            )
+        else:
+            raise NotImplementedError(
+                "Native RocFP4 MoE kernels not yet implemented"
+            )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self.emulate:
+            raise NotImplementedError(
+                "Native RocFP4 MoE kernels not yet implemented"
+            )
+
+        # Go through `fused_experts` with the rocfp4 quant_config so that
+        # `moe_kernel_quantize_input` invokes `_rocfp4_quantize` on the input
+        # and intermediate activations. The triton MoE kernel and its tile
+        # config are identical to the plain bf16 path, so the only cost on top
+        # of bf16 is the per-forward QDQ itself.
+        from vllm.model_executor.layers.fused_moe import fused_experts
+
+        return fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=not self.moe.disable_inplace,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            expert_map=layer.expert_map,
+            quant_config=self.moe_quant_config,
+        )

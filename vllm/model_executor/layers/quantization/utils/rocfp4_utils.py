@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Utilities for RocFP4 quantization.
+
+RocFP4 uses:
+- FP4 data format (4-bit floating point)
+- FP8 E5M3 scales (8-bit floating point for scales)
+- Per-group quantization with group_size=16
+"""
+
+import os
+
+import torch
+
+try:
+    from quark.torch.quantization.config.config import RocFP4Spec
+    from quark.torch.quantization.tensor_quantize import DynamicScaledFakeQuantize
+except ImportError as _quark_import_err:
+    RocFP4Spec = None
+    DynamicScaledFakeQuantize = None
+    _QUARK_IMPORT_ERR = _quark_import_err
+else:
+    _QUARK_IMPORT_ERR = None
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+__all__ = ["quant_dequant_rocfp4", "skip_rocfp4_activation_qdq"]
+
+# Global quantizer instance (created on first use)
+_rocfp4_quantizer = None
+
+
+def skip_rocfp4_activation_qdq() -> bool:
+    """
+    Whether to skip the per-forward fp4 activation quantize-dequantize step.
+
+    When VLLM_ROCFP4_SKIP_ACT_QDQ=1 is set, `quant_dequant_rocfp4` becomes a
+    no-op: weights are still dequantized to bf16 once at load time, and the
+    forward path runs as a plain bf16 MoE without the per-token fp4 QDQ
+    emulation. Useful as a perf escape hatch -- accuracy then only reflects
+    the weight-quantization side of rocfp4 (no activation emulation).
+    """
+    return os.environ.get("VLLM_ROCFP4_SKIP_ACT_QDQ", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def quant_dequant_rocfp4(
+    x: torch.Tensor,
+    group_size: int = 16,
+) -> torch.Tensor:
+    """
+    Simulate RocFP4 quantization by quantizing and immediately dequantizing.
+    """
+    if skip_rocfp4_activation_qdq():
+        return x
+
+    global _rocfp4_quantizer
+
+    if _QUARK_IMPORT_ERR is not None:
+        raise RuntimeError(
+            "RocFP4 quantization requires `quark` with RocFP4Spec / "
+            "DynamicScaledFakeQuantize, which is not available in the "
+            "installed `amd-quark`."
+        ) from _QUARK_IMPORT_ERR
+
+    if _rocfp4_quantizer is None:
+        rocfp4_spec = RocFP4Spec(ch_axis=-1, group_size=group_size, is_dynamic=True)
+        rocfp4_qtensor_config = rocfp4_spec.to_quantization_spec()
+        _rocfp4_quantizer = DynamicScaledFakeQuantize(
+            rocfp4_qtensor_config, device=torch.get_default_device()
+        )
+
+    # Apply quantize-dequantize
+    return _rocfp4_quantizer(x)
