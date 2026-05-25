@@ -107,6 +107,14 @@ def register_quantization_config(quantization: str):
 
 
 def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
+    if quantization == "quark_online":
+        try:
+            import quark.online_quantization.vllm  # noqa: F401
+        except ImportError as e:
+            raise ImportError(
+                "quantization='quark_online' requires the quark package"
+            ) from e
+
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
