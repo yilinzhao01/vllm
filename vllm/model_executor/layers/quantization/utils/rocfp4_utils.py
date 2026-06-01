@@ -10,6 +10,10 @@ RocFP4 uses:
 """
 
 import torch
+from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
+    fake_quantize_fp4_fp6_per_group_with_scale,
+    fake_quantize_fp8_e5m3_per_tensor_with_scale,
+)
 from quark.torch.quantization.config.config import RocFP4Spec
 from quark.torch.quantization.tensor_quantize import DynamicScaledFakeQuantize
 
@@ -17,10 +21,14 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-__all__ = ["quant_dequant_rocfp4"]
+__all__ = ["quant_dequant_rocfp4", "quant_dequant_rocfp4_global"]
 
 # Global quantizer instance (created on first use)
 _rocfp4_quantizer = None
+
+_FP4_QUANT_MAX = 6.0
+_E5M3_QUANT_MAX = 114688.0
+_SCALE_EPS = torch.finfo(torch.float32).eps
 
 
 def quant_dequant_rocfp4(
@@ -41,3 +49,30 @@ def quant_dequant_rocfp4(
 
     # Apply quantize-dequantize
     return _rocfp4_quantizer(x)
+
+
+def quant_dequant_rocfp4_global(
+    x: torch.Tensor,
+    group_size: int = 16,
+    global_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Two-stage rocfp4_global activation QDQ: FP4 per-group, then the per-group
+    scale is requantized to FP8 E5M3 through a global scale.
+    """
+    xf = x.detach().to(torch.float32)
+    block_scale = (
+        xf.reshape(*xf.shape[:-1], xf.shape[-1] // group_size, group_size)
+        .abs()
+        .amax(-1)
+        / _FP4_QUANT_MAX
+    )
+    block_scale = block_scale.masked_fill(block_scale == 0.0, _SCALE_EPS)
+    if global_scale is None:
+        global_scale = block_scale.amax() / _E5M3_QUANT_MAX
+    else:
+        global_scale = global_scale.to(torch.float32)
+    eff_scale = fake_quantize_fp8_e5m3_per_tensor_with_scale(block_scale, global_scale)
+    return fake_quantize_fp4_fp6_per_group_with_scale(
+        x, eff_scale, -1, group_size, "fp4"
+    )

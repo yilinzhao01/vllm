@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
+    rocfp4_global_moe_quant_config,
     rocfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
@@ -85,6 +86,7 @@ __all__ = [
     "QuarkNvfp4MoEMethod",
     "QuarkOCP_MX_MoEMethod_OSS",
     "Quark_rocFP4_MoEMethod",
+    "Quark_rocFP4_Global_MoEMethod",
 ]
 
 
@@ -116,6 +118,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         elif quant_config._is_nvfp4(weight_config, input_config):
             return QuarkNvfp4MoEMethod(
                 weight_config, input_config, module.moe_config, quant_config
+            )
+        elif quant_config._is_rocfp4_global(weight_config, input_config):
+            return Quark_rocFP4_Global_MoEMethod(
+                weight_config, input_config, module.moe_config
             )
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
@@ -2101,4 +2107,121 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
+        )
+
+
+class Quark_rocFP4_Global_MoEMethod(Quark_rocFP4_MoEMethod):
+    """
+    Quark rocfp4_global MoE method: effective per-group scale =
+    e5m3_dequant(weight_scale) * weight_scale_2 (per-tensor global).
+    """
+
+    def __init__(
+        self,
+        weight_config: list[dict[str, Any]],
+        input_config: list[dict[str, Any]],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(weight_config, input_config, moe)
+        self.group_size = weight_config[0]["group_size"]
+        self.input_global_static = not input_config[1].get("is_dynamic")
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        w13_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+
+        w2_weight_scale_2 = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+        if self.input_global_static:
+            w13_input_scale_2 = torch.nn.Parameter(
+                torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+            )
+            layer.register_parameter("w13_input_scale_2", w13_input_scale_2)
+            set_weight_attrs(w13_input_scale_2, extra_weight_attrs)
+
+            w2_input_scale_2 = torch.nn.Parameter(
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+            )
+            layer.register_parameter("w2_input_scale_2", w2_input_scale_2)
+            set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
+
+    def _expert_global_scales(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        intermediate = layer.w13_weight_scale.shape[1] // 2
+        w13_global = layer.w13_weight_scale_2.data.repeat_interleave(
+            intermediate, dim=1
+        ).unsqueeze(-1)
+        w2_global = layer.w2_weight_scale_2.data.view(-1, 1, 1)
+        return w13_global, w2_global
+
+    @staticmethod
+    def _fold_global_scale(
+        scale: torch.Tensor, global_scale: torch.Tensor
+    ) -> torch.Tensor:
+        # Dequantize the E5M3 byte codes, then apply the global scale.
+        scale = quark.torch.kernel.dequantize(
+            "fp8_e5m3", scale.to(torch.uint8), None, None, -1, 1, "per_group"
+        )
+        return scale * global_scale
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Fold the globals into the per-group scales, then defer to the base path.
+        w13_global, w2_global = self._expert_global_scales(layer)
+        layer.w13_weight_scale.data = self._fold_global_scale(
+            layer.w13_weight_scale.data, w13_global
+        )
+        layer.w2_weight_scale.data = self._fold_global_scale(
+            layer.w2_weight_scale.data, w2_global
+        )
+        if self.input_global_static:
+            layer.a13_global_scale = torch.nn.Parameter(
+                layer.w13_input_scale_2.max().to(torch.float32), requires_grad=False
+            )
+            layer.a2_global_scale = torch.nn.Parameter(
+                layer.w2_input_scale_2.max().to(torch.float32), requires_grad=False
+            )
+            layer.w13_input_scale_2 = None
+            layer.w2_input_scale_2 = None
+        super().process_weights_after_loading(layer)
+        layer.w13_weight_scale_2 = None
+        layer.w2_weight_scale_2 = None
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        if self.emulate:
+            return rocfp4_global_moe_quant_config(
+                w1_scale=None,
+                w2_scale=None,
+                a1_scale=getattr(layer, "a13_global_scale", None),
+                a2_scale=getattr(layer, "a2_global_scale", None),
+                group_size=self.group_size,
+            )
+        raise NotImplementedError(
+            "Native RocFP4 global MoE kernels not yet implemented"
         )
