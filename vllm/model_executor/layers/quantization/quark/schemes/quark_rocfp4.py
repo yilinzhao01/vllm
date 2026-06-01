@@ -30,7 +30,8 @@ class QuarkROCFP4(QuarkScheme):
 
     Supports loading ROCFP4 checkpoints with the following structure:
     - weight: uint8, shape [out_features, in_features // 2] (packed FP4)
-    - weight_scale: uint8, shape [out_features, in_features // group_size] (FP8 E5M3)
+    - weight_scale: shape [out_features, in_features // group_size], FP8 E5M3
+      stored as uint8, bf16, or fp32
     """
 
     def __init__(self):
@@ -81,13 +82,14 @@ class QuarkROCFP4(QuarkScheme):
         )
         layer.register_parameter("weight", weight)
 
-        # Per-group weight scale (FP8 E5M3 stored as uint8)
+        # Per-group weight scale: FP8 E5M3 stored as uint8, bf16, or fp32
+        # (fp32 buffer holds all three).
         # Shape: [out_features, in_features // group_size]
         weight_scale = GroupQuantScaleParameter(
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition // self.group_size,
-                dtype=torch.uint8,  # FP8 E5M3 stored as uint8
+                dtype=torch.float32,
             ),
             input_dim=1,
             output_dim=0,
@@ -103,27 +105,24 @@ class QuarkROCFP4(QuarkScheme):
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
-        # TODO: use a single functional call to unpack and dequantize weights,
-        # currently ugly.
-        weight_scale_dq = quark.torch.kernel.dequantize(  # type: ignore[attr-defined]
-            "fp8_e5m3",
-            layer.weight_scale.data,
-            None,  # scale
-            None,  # zero_point
-            -1,  # ch_axis
-            1,  # group_size
-            "per_group",  # qscheme
-        )
+        weight_scale_dq = layer.weight_scale.data
+        # FP8 E5M3 scales load into the fp32 buffer as integer byte codes;
+        # bf16/fp32 ckpts already hold the dequantized scale.
+        if (weight_scale_dq == weight_scale_dq.round()).all():
+            weight_scale_dq = quark.torch.kernel.dequantize(
+                "fp8_e5m3",
+                weight_scale_dq.to(torch.uint8),
+                None,
+                None,
+                -1,
+                1,
+                "per_group",
+            )
 
         packing_instance = Pack_fp4(None, "fp4")
-
-        weight = packing_instance.unpack(
-            layer.weight.data,
-            reorder=None,
-        )
-
+        weight = packing_instance.unpack(layer.weight.data, reorder=None)
         weight_dq = quark.torch.kernel.dequantize(
-            "fp4", weight, weight_scale_dq, None, -1, 16, "per_group"
+            "fp4", weight, weight_scale_dq, None, -1, self.group_size, "per_group"
         )
         weight_dq = weight_dq.to(layer.params_dtype)
 
