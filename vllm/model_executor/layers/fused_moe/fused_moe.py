@@ -1335,6 +1335,8 @@ def inplace_fused_experts(
     use_int4_w4a16: bool = False,
     use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
+    use_rocfp4_global: bool = False,
+    rocfp4_group_size: int = 16,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1363,6 +1365,8 @@ def inplace_fused_experts(
         use_int4_w4a16,
         use_rocfp4,
         ocp_mx_scheme,
+        use_rocfp4_global,
+        rocfp4_group_size,
         per_channel_quant,
         global_num_experts,
         expert_map,
@@ -1392,6 +1396,8 @@ def inplace_fused_experts_fake(
     use_int4_w4a16: bool = False,
     use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
+    use_rocfp4_global: bool = False,
+    rocfp4_group_size: int = 16,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1430,6 +1436,8 @@ def outplace_fused_experts(
     use_int4_w4a16: bool = False,
     use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
+    use_rocfp4_global: bool = False,
+    rocfp4_group_size: int = 16,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1458,6 +1466,8 @@ def outplace_fused_experts(
         use_int4_w4a16,
         use_rocfp4,
         ocp_mx_scheme,
+        use_rocfp4_global,
+        rocfp4_group_size,
         per_channel_quant,
         global_num_experts,
         expert_map,
@@ -1487,6 +1497,8 @@ def outplace_fused_experts_fake(
     use_int4_w4a16: bool = False,
     use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
+    use_rocfp4_global: bool = False,
+    rocfp4_group_size: int = 16,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1561,6 +1573,8 @@ def fused_experts(
         use_int4_w4a16=quant_config.use_int4_w4a16,
         use_rocfp4=quant_config.use_rocfp4,
         ocp_mx_scheme=quant_config.ocp_mx_scheme,
+        use_rocfp4_global=quant_config.use_rocfp4_global,
+        rocfp4_group_size=quant_config.rocfp4_group_size,
         per_channel_quant=quant_config.per_act_token_quant,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
@@ -1581,6 +1595,7 @@ def _get_config_quant_dtype(
     use_int8_w8a8: bool,
     ocp_mx_scheme: str | None,
     use_rocfp4: bool = False,
+    use_rocfp4_global: bool = False,
 ) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1595,6 +1610,8 @@ def _get_config_quant_dtype(
         return torch.int8
     elif use_rocfp4:
         return "rocfp4"
+    elif use_rocfp4_global:
+        return "rocfp4_global"
     elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":
         return "mxfp4"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e3m2", "w_mxfp6_e3m2_a_mxfp6_e3m2"}:
@@ -1624,6 +1641,8 @@ def fused_experts_impl(
     use_int4_w4a16: bool = False,
     use_rocfp4: bool = False,
     ocp_mx_scheme: str | None = None,
+    use_rocfp4_global: bool = False,
+    rocfp4_group_size: int = 16,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -1690,6 +1709,7 @@ def fused_experts_impl(
         use_int8_w8a8=use_int8_w8a8,
         ocp_mx_scheme=ocp_mx_scheme,
         use_rocfp4=use_rocfp4,
+        use_rocfp4_global=use_rocfp4_global,
     )
 
     get_config_func = functools.partial(
@@ -1797,6 +1817,7 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
+            rocfp4_group_size=rocfp4_group_size,
         )
 
         # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
@@ -1865,6 +1886,7 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
             ocp_mx_scheme=ocp_mx_scheme,
+            rocfp4_group_size=rocfp4_group_size,
         )
 
         if expert_map is not None:

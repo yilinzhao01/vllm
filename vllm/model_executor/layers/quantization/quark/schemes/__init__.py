@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .quark_ocp_mx import QuarkOCP_MX
-from .quark_rocfp4 import QuarkROCFP4
+from .quark_rocfp4 import QuarkROCFP4, QuarkROCFP4Global
 from .quark_scheme import QuarkScheme
 from .quark_w8a8_fp8 import QuarkW8A8Fp8
 from .quark_w8a8_int8 import QuarkW8A8Int8
@@ -13,4 +13,5 @@ __all__ = [
     "QuarkW8A8Int8",
     "QuarkOCP_MX",
     "QuarkROCFP4",
+    "QuarkROCFP4Global",
 ]

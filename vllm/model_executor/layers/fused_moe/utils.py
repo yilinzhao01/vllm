@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.rocfp4_utils import (
     quant_dequant_rocfp4,
+    quant_dequant_rocfp4_global,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
@@ -251,6 +252,17 @@ def _rocfp4_quantize(
     return A, None
 
 
+def _rocfp4_global_quantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    per_act_token_quant: bool,
+    block_shape: list[int] | None = None,
+    group_size: int = 16,
+) -> tuple[torch.Tensor, None]:
+    A = quant_dequant_rocfp4_global(A, group_size, global_scale=A_scale)
+    return A, None
+
+
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -259,6 +271,7 @@ def moe_kernel_quantize_input(
     block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
     ocp_mx_scheme: str | None = None,
+    rocfp4_group_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
@@ -297,6 +310,10 @@ def moe_kernel_quantize_input(
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "rocfp4":
         return _rocfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "rocfp4_global":
+        return _rocfp4_global_quantize(
+            A, A_scale, per_act_token_quant, block_shape, rocfp4_group_size
+        )
     else:
         return A, A_scale
 

@@ -228,6 +228,7 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
+    rocfp4_group_size: int = 16  # 16 / 32
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -399,6 +400,10 @@ class FusedMoEQuantConfig:
         return self.quant_dtype == "rocfp4"
 
     @property
+    def use_rocfp4_global(self) -> bool:
+        return self.quant_dtype == "rocfp4_global"
+
+    @property
     def use_mxfp4_w4a8(self) -> bool:
         return self._a1.dtype == "fp8" and self._w1.dtype == "mxfp4"
 
@@ -475,6 +480,7 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        rocfp4_group_size: int = 16,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -512,6 +518,7 @@ class FusedMoEQuantConfig:
             "mxfp6_e2m3",
             "mxfp8",
             "rocfp4",
+            "rocfp4_global",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
@@ -521,6 +528,7 @@ class FusedMoEQuantConfig:
             "int4",
             "mxfp8",
             "rocfp4",
+            "rocfp4_global",
         }
 
         if weight_dtype is None:
@@ -538,6 +546,7 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
+            rocfp4_group_size=rocfp4_group_size,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -805,6 +814,33 @@ def rocfp4_moe_quant_config(
         per_act_token_quant=False,  # Per-group, not per-token
         per_out_ch_quant=False,
         block_shape=block_shape,
+    )
+
+
+def rocfp4_global_moe_quant_config(
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    group_size: int = 16,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for rocfp4_global activations and weights.
+
+    Same as rocfp4_moe_quant_config but activations use the two-stage QDQ
+    (FP4 per-group + FP8 E5M3 per-tensor global scale).
+    """
+    return FusedMoEQuantConfig.make(
+        quant_dtype="rocfp4_global",
+        weight_dtype="rocfp4_global",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_act_token_quant=False,  # Per-group, not per-token
+        per_out_ch_quant=False,
+        block_shape=None,
+        rocfp4_group_size=group_size,
     )
 
 

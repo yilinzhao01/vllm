@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
 from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX,
     QuarkROCFP4,
+    QuarkROCFP4Global,
     QuarkScheme,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
@@ -384,6 +385,48 @@ class QuarkConfig(QuantizationConfig):
 
         return True
 
+    def _is_rocfp4_global(
+        self,
+        weight_quant: dict[str, Any] | list[dict[str, Any]] | None,
+        input_quant: dict[str, Any] | list[dict[str, Any]] | None,
+    ) -> bool:
+        """
+        Detect the two-stage ROCFP4 global-scale scheme: weight and input are
+        each a 2-element list (fp4 per_group + fp8_e5m3 per_tensor global).
+        """
+        if weight_quant is None or input_quant is None:
+            return False
+        if not (isinstance(weight_quant, list) and len(weight_quant) == 2):
+            return False
+        if not (isinstance(input_quant, list) and len(input_quant) == 2):
+            return False
+
+        w0, w1 = weight_quant
+        i0, i1 = input_quant
+        group_size = w0.get("group_size")
+
+        stage0_ok = (
+            w0.get("dtype") == "fp4"
+            and w0.get("qscheme") == "per_group"
+            and group_size in (16, 32)
+            and not w0.get("is_dynamic")
+            and i0.get("dtype") == "fp4"
+            and i0.get("qscheme") == "per_group"
+            and i0.get("group_size") == group_size
+            and i0.get("is_dynamic")
+        )
+        stage1_ok = (
+            w1.get("dtype") == "fp8_e5m3"
+            and w1.get("qscheme") == "per_tensor"
+            and not w1.get("is_dynamic")
+            and i1.get("dtype") == "fp8_e5m3"
+            and i1.get("qscheme") == "per_tensor"
+        )
+        if stage0_ok and stage1_ok:
+            logger.info_once("Detected ROCFP4 global-scale quantization scheme")
+            return True
+        return False
+
     def _is_rocfp4(
         self,
         weight_quant: dict[str, Any] | None,
@@ -546,7 +589,15 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        # rocfp4_global stores weight/input as 2-element lists, which would
+        # crash the dict-based checks below, so detect it first.
+        if self._is_rocfp4_global(weight_config, input_config):
+            input_global_static = not input_config[1].get("is_dynamic")
+            return QuarkROCFP4Global(
+                group_size=weight_config[0]["group_size"],
+                input_global_static=input_global_static,
+            )
+        elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
