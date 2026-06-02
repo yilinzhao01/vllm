@@ -1052,7 +1052,7 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
 
     Supports loading RocFP4 checkpoints with the following structure:
     - Weights: FP4 packed in uint8 (2 values per byte)
-    - Scales: bfloat16, per-group (group_size=16)
+    - Scales: FP8 E5M3 per-group (group_size=16), stored as uint8, bf16, or fp32
     - Dynamic rocFP4 activation quantization.
     """
 
@@ -1119,28 +1119,28 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # W13 WEIGHT SCALES: bfloat16 per-group scales
-        # Shape: [num_experts, 2*intermediate_size, hidden_size // 16]
+        # W13 WEIGHT SCALES: FP8 E5M3 per-group scales (fp32 buffer holds
+        # uint8/bf16/fp32). Shape: [num_experts, 2*intermediate_size, hidden_size // 16]
         w13_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // self.group_size,
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
             ),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
-        # W2 WEIGHT SCALES: bfloat16 per-group scales
-        # Shape: [num_experts, hidden_size, intermediate_size // 16]
+        # W2 WEIGHT SCALES: FP8 E5M3 per-group scales (fp32 buffer holds
+        # uint8/bf16/fp32). Shape: [num_experts, hidden_size, intermediate_size // 16]
         w2_weight_scale = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // self.group_size,
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
             ),
             requires_grad=False,
         )
@@ -1151,14 +1151,21 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
         if self.emulate:
             packing_instance = Pack_fp4(None, "fp4")
 
-            # Scales are bfloat16 in the ckpt; cast to fp32 for the quark
-            # fp4 dequantize kernel which expects float scales.
-            w13_scale_dq = layer.w13_weight_scale.data.to(torch.float32)
-            w13_unpacked = packing_instance.unpack(
-                layer.w13_weight.data,
-                reorder=None,
-            )
-
+            # Process w13_weight
+            # Dequantize scales: uint8 (E5M3 bits) load into the fp32 buffer
+            # as integer byte codes; bf16/fp32 ckpts already hold the float scale.
+            w13_scale_dq = layer.w13_weight_scale.data
+            if (w13_scale_dq == w13_scale_dq.round()).all():
+                w13_scale_dq = quark.torch.kernel.dequantize(
+                    "fp8_e5m3",
+                    w13_scale_dq.to(torch.uint8),
+                    None,
+                    None,
+                    -1,
+                    1,
+                    "per_group",
+                )
+            w13_unpacked = packing_instance.unpack(layer.w13_weight.data, reorder=None)
             # Dequantize FP4 weights using FP32 scales
             w13_dq = quark.torch.kernel.dequantize(
                 "fp4",
@@ -1175,12 +1182,18 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
             layer.w13_weight_scale = None
 
             # Process w2_weight (same process)
-            w2_scale_dq = layer.w2_weight_scale.data.to(torch.float32)
-            w2_unpacked = packing_instance.unpack(
-                layer.w2_weight.data,
-                reorder=None,
-            )
-
+            w2_scale_dq = layer.w2_weight_scale.data
+            if (w2_scale_dq == w2_scale_dq.round()).all():
+                w2_scale_dq = quark.torch.kernel.dequantize(
+                    "fp8_e5m3",
+                    w2_scale_dq.to(torch.uint8),
+                    None,
+                    None,
+                    -1,
+                    1,
+                    "per_group",
+                )
+            w2_unpacked = packing_instance.unpack(layer.w2_weight.data, reorder=None)
             w2_dq = quark.torch.kernel.dequantize(
                 "fp4",
                 w2_unpacked,
