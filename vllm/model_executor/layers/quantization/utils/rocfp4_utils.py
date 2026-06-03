@@ -44,23 +44,6 @@ _E5M3_QUANT_MAX = 114688.0
 _SCALE_EPS = torch.finfo(torch.float32).eps
 
 
-def skip_rocfp4_activation_qdq() -> bool:
-    """
-    Whether to skip the per-forward fp4 activation quantize-dequantize step.
-
-    When VLLM_ROCFP4_SKIP_ACT_QDQ=1 is set, `quant_dequant_rocfp4` becomes a
-    no-op: weights are still dequantized to bf16 once at load time, and the
-    forward path runs as a plain bf16 MoE without the per-token fp4 QDQ
-    emulation. Useful as a perf escape hatch -- accuracy then only reflects
-    the weight-quantization side of rocfp4 (no activation emulation).
-    """
-    return os.environ.get("VLLM_ROCFP4_SKIP_ACT_QDQ", "0").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-
 def quant_dequant_rocfp4(
     x: torch.Tensor,
     group_size: int = 16,
@@ -68,9 +51,6 @@ def quant_dequant_rocfp4(
     """
     Simulate RocFP4 quantization by quantizing and immediately dequantizing.
     """
-    if skip_rocfp4_activation_qdq():
-        return x
-
     global _rocfp4_quantizer
 
     if _QUARK_IMPORT_ERR is not None:

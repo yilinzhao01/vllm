@@ -303,34 +303,44 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
+        if 0:
+            num_tokens = q.shape[0]
+            output = torch.empty(
+                [num_tokens, self.num_heads, self.kv_lora_rank],
+                dtype=q.dtype,
+                device=q.device,
+            )
+            seq_len = (topk_indices != -1).sum(dim=-1)
+            torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
+            attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
+            fetch_id_to_ragged_triton(
+                topk_indices,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.topk_tokens,
+            )
+
+            rocm_aiter_ops.mla_decode_fwd(
+                q,
+                kv_c_and_k_pe_cache,
+                output,
+                self.scale,
+                attn_metadata.qo_indptr,
+                1,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+            )
+
         num_tokens = q.shape[0]
-        output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device,
-        )
-        seq_len = (topk_indices != -1).sum(dim=-1)
-        torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
-        attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
-        fetch_id_to_ragged_triton(
-            topk_indices,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            attn_metadata.topk_tokens,
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
+            -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        rocm_aiter_ops.mla_decode_fwd(
-            q,
-            kv_c_and_k_pe_cache,
-            output,
-            self.scale,
-            attn_metadata.qo_indptr,
-            1,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            attn_metadata.paged_kv_last_page_len,
-        )
-
+        topk_indices = topk_indices.view(num_tokens, 1, -1)
+        output = reference_mla_sparse_prefill(
+            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale, 512
+        )[0]
         return output[:, : self.num_heads, :]
 
     def forward_mqa(

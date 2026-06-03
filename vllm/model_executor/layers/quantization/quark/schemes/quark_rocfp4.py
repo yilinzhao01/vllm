@@ -133,6 +133,8 @@ class QuarkROCFP4(QuarkScheme):
         layer.weight = Parameter(weight_dq, requires_grad=False)
         layer.weight_scale = None
 
+        torch.cuda.empty_cache()
+
     def apply_weights(
         self,
         layer: torch.nn.Module,

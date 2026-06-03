@@ -1216,6 +1216,8 @@ class Quark_rocFP4_MoEMethod(QuarkMoEMethod):
             layer.w2_weight = Parameter(w2_dq, requires_grad=False)
             layer.w2_weight_scale = None
 
+            torch.cuda.empty_cache()
+
             # Cache the rocfp4 quant config; apply() passes it to
             # `fused_experts` so that `moe_kernel_quantize_input` calls
             # `_rocfp4_quantize` at the input and intermediate stages. The
